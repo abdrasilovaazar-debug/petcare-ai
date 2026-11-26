@@ -4,7 +4,6 @@ from PIL import Image
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 st.set_page_config(
     page_title="Эмпатика — Платформа заботы о питомцах",
@@ -18,7 +17,7 @@ st.markdown("""
     [data-testid="stToolbar"] {visibility: hidden !important;}
     footer {visibility: hidden !important;}
     .block-container {
-        padding-top: 2rem;
+        padding-top: 3.2rem;
         padding-bottom: 3rem;
         max-width: 1150px;
     }
@@ -104,7 +103,7 @@ st.markdown("""
 
 def get_client():
     try:
-        return genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+        return genai.Client(api_key=st.secrets["GEMINI_API_KEY"].strip())
     except Exception:
         st.error("API-ключ не найден в настройках Secrets.")
         return None
@@ -114,37 +113,16 @@ def prepare_image(uploaded_file):
     img.thumbnail((1024, 1024))
     return img
 
-def get_active_model(client):
-    if "active_model" in st.session_state:
-        return st.session_state["active_model"]
-    try:
-        available = []
-        for m in client.models.list():
-            name = getattr(m, "name", "").replace("models/", "")
-            actions = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or []
-            if "gemini" in name.lower() and "flash" in name.lower():
-                if not any(x in name.lower() for x in ["audio", "tts", "image", "embedding", "live"]):
-                    if not actions or "generateContent" in actions:
-                        available.append(name)
-        for preferred in ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.0-flash"]:
-            if preferred in available:
-                st.session_state["active_model"] = preferred
-                return preferred
-        if available:
-            st.session_state["active_model"] = available[0]
-            return available[0]
-    except Exception:
-        pass
-    return "gemini-3.8-flash"
-
 def ask_gemini(client, contents):
-    model_name = get_active_model(client)
-    def _call():
-        return client.models.generate_content(model=model_name, contents=contents).text
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_call)
-        return future.result(timeout=35)
+    models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
+    errors = []
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(model=model_name, contents=contents)
+            return response.text
+        except Exception as e:
+            errors.append(f"{model_name}: {e}")
+    raise RuntimeError("\n".join(errors))
 
 @st.cache_data
 def load_food_data():
@@ -208,10 +186,8 @@ with tab1:
                                 contents.append(prepare_image(health_img_file))
                             result = ask_gemini(client, contents)
                             st.markdown(result)
-                        except TimeoutError:
-                            st.error("Сервер ИИ отвечает слишком долго. Попробуйте нажать кнопку ещё раз.")
                         except Exception as e:
-                            st.error(f"Ошибка при обращении к ИИ: {e}")
+                            st.error(f"Ошибка при обращении к ИИ:\n{e}")
                 elif client:
                     st.warning("Загрузите фотографию или опишите симптомы слева.")
             else:
@@ -256,10 +232,8 @@ with tab2:
                             st.markdown(result)
                             st.divider()
                             st.download_button("📥 Скачать текст поста (.txt)", data=result, file_name=f"post_{pet_name or 'pet'}.txt", mime="text/plain")
-                        except TimeoutError:
-                            st.error("Сервер ИИ отвечает слишком долго. Попробуйте нажать кнопку ещё раз.")
                         except Exception as e:
-                            st.error(f"Ошибка при генерации поста: {e}")
+                            st.error(f"Ошибка при генерации поста:\n{e}")
                 elif client:
                     st.warning("Заполните описание характера питомца слева.")
             else:
