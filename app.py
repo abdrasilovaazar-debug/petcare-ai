@@ -1,5 +1,8 @@
 import streamlit as st
-from google import genai
+import requests
+import base64
+import io
+import time
 from PIL import Image
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
@@ -17,7 +20,7 @@ st.markdown("""
     [data-testid="stToolbar"] {visibility: hidden !important;}
     footer {visibility: hidden !important;}
     .block-container {
-        padding-top: 3.2rem;
+        padding-top: 3.8rem;
         padding-bottom: 3rem;
         max-width: 1150px;
     }
@@ -101,28 +104,47 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def get_client():
-    try:
-        return genai.Client(api_key=st.secrets["GEMINI_API_KEY"].strip())
-    except Exception:
-        st.error("API-ключ не найден в настройках Secrets.")
-        return None
-
-def prepare_image(uploaded_file):
+def encode_image(uploaded_file):
     img = Image.open(uploaded_file).convert("RGB")
-    img.thumbnail((1024, 1024))
-    return img
+    img.thumbnail((800, 800))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-def ask_gemini(client, contents):
-    models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
-    errors = []
-    for model_name in models_to_try:
-        try:
-            response = client.models.generate_content(model=model_name, contents=contents)
-            return response.text
-        except Exception as e:
-            errors.append(f"{model_name}: {e}")
-    raise RuntimeError("\n".join(errors))
+def ask_gemini(prompt, uploaded_file=None):
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"].strip()
+    except Exception:
+        raise RuntimeError("Не найден GEMINI_API_KEY в настройках Secrets.")
+
+    parts = [{"text": prompt}]
+    if uploaded_file is not None:
+        parts.append({
+            "inline_data": {
+                "mime_type": "image/jpeg",
+                "data": encode_image(uploaded_file)
+            }
+        })
+
+    payload = {"contents": [{"parts": parts}]}
+    models = ["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-3.5-flash"]
+
+    for attempt in range(2):
+        for model_name in models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+            try:
+                resp = requests.post(url, json=payload, timeout=18)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                if resp.status_code in (400, 403):
+                    raise RuntimeError("Ошибка доступа API-ключа. Проверьте ключ в настройках Secrets.")
+            except requests.exceptions.Timeout:
+                continue
+        if attempt == 0:
+            time.sleep(2)
+
+    raise RuntimeError("Серверы Google ИИ сейчас временно перегружены запросами. Подождите 10–15 секунд и нажмите кнопку ещё раз.")
 
 @st.cache_data
 def load_food_data():
@@ -168,8 +190,7 @@ with tab1:
         with st.container(border=True):
             st.subheader("2. Заключение ИИ-ассистента")
             if analyze_btn:
-                client = get_client()
-                if client and (health_img_file or symptoms_text):
+                if health_img_file or symptoms_text:
                     with st.spinner("Нейросеть изучает изображение и симптомы..."):
                         try:
                             prompt = (
@@ -181,14 +202,11 @@ with tab1:
                                 "Добавь короткий дисклеймер, что это не заменяет приём ветеринара.\n"
                                 f"Описание: {symptoms_text}"
                             )
-                            contents = [prompt]
-                            if health_img_file:
-                                contents.append(prepare_image(health_img_file))
-                            result = ask_gemini(client, contents)
+                            result = ask_gemini(prompt, health_img_file)
                             st.markdown(result)
                         except Exception as e:
-                            st.error(f"Ошибка при обращении к ИИ:\n{e}")
-                elif client:
+                            st.warning(str(e))
+                else:
                     st.warning("Загрузите фотографию или опишите симптомы слева.")
             else:
                 st.markdown("""
@@ -216,8 +234,7 @@ with tab2:
         with st.container(border=True):
             st.subheader("2. Готовый текст для Instagram")
             if gen_post_btn:
-                client = get_client()
-                if client and pet_traits:
+                if pet_traits or adopt_img_file:
                     with st.spinner("Создаём текст для пристройства..."):
                         try:
                             prompt = (
@@ -225,17 +242,14 @@ with tab2:
                                 f"Кличка и возраст: {pet_name}. Характер: {pet_traits}. Тон: {post_tone}. "
                                 "Если есть фото, опиши милые детали внешности. Добавь заголовок, плюсы питомца, призыв и 5 хэштегов."
                             )
-                            contents = [prompt]
-                            if adopt_img_file:
-                                contents.append(prepare_image(adopt_img_file))
-                            result = ask_gemini(client, contents)
+                            result = ask_gemini(prompt, adopt_img_file)
                             st.markdown(result)
                             st.divider()
                             st.download_button("📥 Скачать текст поста (.txt)", data=result, file_name=f"post_{pet_name or 'pet'}.txt", mime="text/plain")
                         except Exception as e:
-                            st.error(f"Ошибка при генерации поста:\n{e}")
-                elif client:
-                    st.warning("Заполните описание характера питомца слева.")
+                            st.warning(str(e))
+                else:
+                    st.warning("Заполните описание характера питомца или загрузите фото слева.")
             else:
                 st.markdown("""
                 <div class="empty-state">
