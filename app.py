@@ -114,12 +114,33 @@ def prepare_image(uploaded_file):
     img.thumbnail((1024, 1024))
     return img
 
+def get_active_model(client):
+    if "active_model" in st.session_state:
+        return st.session_state["active_model"]
+    try:
+        available = []
+        for m in client.models.list():
+            name = getattr(m, "name", "").replace("models/", "")
+            actions = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None) or []
+            if "gemini" in name.lower() and "flash" in name.lower():
+                if not any(x in name.lower() for x in ["audio", "tts", "image", "embedding", "live"]):
+                    if not actions or "generateContent" in actions:
+                        available.append(name)
+        for preferred in ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.0-flash"]:
+            if preferred in available:
+                st.session_state["active_model"] = preferred
+                return preferred
+        if available:
+            st.session_state["active_model"] = available[0]
+            return available[0]
+    except Exception:
+        pass
+    return "gemini-3.8-flash"
+
 def ask_gemini(client, contents):
+    model_name = get_active_model(client)
     def _call():
-        try:
-            return client.models.generate_content(model="gemini-3.8-flash", contents=contents).text
-        except Exception:
-            return client.models.generate_content(model="gemini-flash-latest", contents=contents).text
+        return client.models.generate_content(model=model_name, contents=contents).text
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_call)
