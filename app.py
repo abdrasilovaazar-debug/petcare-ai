@@ -20,8 +20,8 @@ st.markdown("""
     [data-testid="stToolbar"] {visibility: hidden !important;}
     footer {visibility: hidden !important;}
     .block-container {
-        padding-top: 3.8rem;
-        padding-bottom: 3rem;
+        padding-top: 4.5rem !important;
+        padding-bottom: 3rem !important;
         max-width: 1150px;
     }
     .hero-card {
@@ -111,6 +111,29 @@ def encode_image(uploaded_file):
     img.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
+@st.cache_data(ttl=3600)
+def get_available_models(api_key):
+    preferred = ["gemini-3.8-flash"]
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        resp = requests.get(url, timeout=6)
+        if resp.status_code == 200:
+            found = []
+            for m in resp.json().get("models", []):
+                name = m.get("name", "").replace("models/", "")
+                methods = m.get("supportedGenerationMethods", [])
+                if "generateContent" in methods:
+                    lower = name.lower()
+                    if any(k in lower for k in ["gemini", "gemma-3"]):
+                        if not any(bad in lower for bad in ["embedding", "tts", "audio", "imagen", "veo", "aqa"]):
+                            if name not in preferred:
+                                found.append(name)
+            found.sort(key=lambda x: (0 if "flash" in x else 1 if "pro" in x else 2 if "27b" in x else 3, x))
+            return preferred + found
+    except Exception:
+        pass
+    return preferred
+
 def ask_gemini(prompt, uploaded_file=None):
     try:
         api_key = st.secrets["GEMINI_API_KEY"].strip()
@@ -127,24 +150,23 @@ def ask_gemini(prompt, uploaded_file=None):
         })
 
     payload = {"contents": [{"parts": parts}]}
-    models = ["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-3.5-flash"]
+    models = get_available_models(api_key)
+    statuses = []
 
-    for attempt in range(2):
-        for model_name in models:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-            try:
-                resp = requests.post(url, json=payload, timeout=18)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return data["candidates"][0]["content"]["parts"][0]["text"]
-                if resp.status_code in (400, 403):
-                    raise RuntimeError("Ошибка доступа API-ключа. Проверьте ключ в настройках Secrets.")
-            except requests.exceptions.Timeout:
-                continue
-        if attempt == 0:
-            time.sleep(2)
+    for model_name in models[:6]:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        try:
+            resp = requests.post(url, json=payload, timeout=18)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+            if resp.status_code == 403:
+                raise RuntimeError("Ошибка доступа API-ключа (403). Проверьте ключ в настройках Secrets.")
+            statuses.append(f"{model_name}:{resp.status_code}")
+        except requests.exceptions.Timeout:
+            statuses.append(f"{model_name}:timeout")
 
-    raise RuntimeError("Серверы Google ИИ сейчас временно перегружены запросами. Подождите 10–15 секунд и нажмите кнопку ещё раз.")
+    raise RuntimeError(f"Серверы Google ИИ сейчас перегружены ({', '.join(statuses)}). Попробуйте через минуту.")
 
 @st.cache_data
 def load_food_data():
